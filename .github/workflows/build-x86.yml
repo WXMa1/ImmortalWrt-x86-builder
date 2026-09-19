@@ -49,7 +49,7 @@ jobs:
             patch pkgconf python3 python3-pip python3-ply \
             python3-docutils python3-pyelftools qemu-utils re2c \
             rsync scons squashfs-tools subversion swig texinfo \
-            uglifyjs unzip vim wget xmlto xxd zlib1g-dev zstd
+            uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
       # 4. 下载官方 ImmortalWrt 源码
       - name: Clone ImmortalWrt
