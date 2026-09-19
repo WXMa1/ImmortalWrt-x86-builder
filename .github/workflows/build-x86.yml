@@ -138,7 +138,21 @@ jobs:
       - name: Build firmware
         working-directory: immortalwrt
         run: |
-          make -j$(nproc) world
+          set +e
+
+          make -j2 world 2>&1 | tee build.log
+          RESULT=${PIPESTATUS[0]}
+
+          if [ "$RESULT" -ne 0 ]; then
+            echo "===== Build failed, retry xray-core with verbose output ====="
+
+            make package/feeds/passwall_packages/xray-core/clean
+
+            make package/feeds/passwall_packages/xray-core/compile \
+              -j1 V=s 2>&1 | tee xray-core-error.log
+
+            exit "$RESULT"
+          fi
 
       # 12. 看看最终生成了什么
       - name: Show build results
@@ -157,3 +171,5 @@ jobs:
             immortalwrt/bin/targets/x86/64/*.buildinfo
             immortalwrt/bin/targets/x86/64/*.manifest
             immortalwrt/bin/targets/x86/64/sha256sums
+            immortalwrt/build.log
+            immortalwrt/xray-core-error.log
