@@ -1,0 +1,159 @@
+name: Build ImmortalWrt x86_64
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "ImmortalWrt branch"
+        required: true
+        default: "openwrt-25.12"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      # 1. 下载我们自己的 builder 仓库
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      # 2. GitHub Runner 空间比较宝贵，删掉我们完全用不到的大型 SDK
+      - name: Free disk space
+        run: |
+          echo "Before cleanup:"
+          df -h
+
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+
+          echo "After cleanup:"
+          df -h
+
+      # 3. 安装 ImmortalWrt 编译依赖
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint \
+            binutils bison build-essential bzip2 ccache clang \
+            cmake cpio curl device-tree-compiler ecj fastjar \
+            flex gawk gettext gcc-multilib g++-multilib git \
+            gnutls-dev gperf haveged help2man intltool \
+            lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool libyaml-dev libz-dev lld llvm \
+            lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pip python3-ply \
+            python3-docutils python3-pyelftools qemu-utils re2c \
+            rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip vim wget xmlto xxd zlib1g-dev zstd
+
+      # 4. 下载官方 ImmortalWrt 源码
+      - name: Clone ImmortalWrt
+        run: |
+          git clone \
+            --depth=1 \
+            --branch="${{ inputs.branch }}" \
+            --single-branch \
+            https://github.com/immortalwrt/immortalwrt.git \
+            immortalwrt
+
+      # 5. 添加 PassWall feeds
+      - name: Add PassWall feeds
+        working-directory: immortalwrt
+        run: |
+          cp feeds.conf.default feeds.conf.default.original
+
+          {
+            echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main"
+            echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main"
+            cat feeds.conf.default.original
+          } > feeds.conf.default
+
+          echo "===== feeds.conf.default ====="
+          cat feeds.conf.default
+
+      # 6. 添加 Lucky
+      - name: Add Lucky
+        working-directory: immortalwrt
+        run: |
+          git clone --depth=1 \
+            https://github.com/sirpdboy/luci-app-lucky.git \
+            package/lucky
+
+      # 7. 下载并安装 feeds
+      - name: Update feeds
+        working-directory: immortalwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 8. 合并基础配置和我们的软件配置
+      - name: Configure firmware
+        working-directory: immortalwrt
+        run: |
+          cat ../x86.config > .config
+          cat ../custom.config >> .config
+
+          make defconfig
+
+          echo "===== Important package selections ====="
+          grep -E \
+            'CONFIG_PACKAGE_(mwan3|luci-app-mwan3|luci-app-passwall|luci-app-lucky|xray-core|sing-box|smartdns|luci-app-zerotier|luci-app-ddns-go|tcpdump)' \
+            .config || true
+
+      # 9. 如果几个最重要的软件被 Kconfig 丢掉，立即停止，不浪费时间编译
+      - name: Verify required packages
+        working-directory: immortalwrt
+        run: |
+          REQUIRED_PACKAGES="
+          mwan3
+          luci-app-mwan3
+          luci-app-passwall
+          luci-app-lucky
+          "
+
+          for pkg in $REQUIRED_PACKAGES; do
+            if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
+              echo "::error::Package ${pkg} was not selected after make defconfig"
+              exit 1
+            fi
+          done
+
+          echo "All required packages are selected."
+
+      # 10. 提前下载源码
+      - name: Download package sources
+        working-directory: immortalwrt
+        run: |
+          make download -j$(nproc)
+
+          # 删除明显损坏/未完整下载的小文件
+          find dl -size -1024c -print -delete || true
+
+      # 11. 正式编译
+      - name: Build firmware
+        working-directory: immortalwrt
+        run: |
+          make -j$(nproc) world
+
+      # 12. 看看最终生成了什么
+      - name: Show build results
+        run: |
+          echo "===== x86/64 output ====="
+          ls -lah immortalwrt/bin/targets/x86/64/
+
+      # 13. 上传固件
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-x86-64
+          retention-days: 30
+          path: |
+            immortalwrt/bin/targets/x86/64/*.img.gz
+            immortalwrt/bin/targets/x86/64/*.buildinfo
+            immortalwrt/bin/targets/x86/64/*.manifest
+            immortalwrt/bin/targets/x86/64/sha256sums
