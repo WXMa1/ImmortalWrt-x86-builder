@@ -1,0 +1,450 @@
+name: Build x86 Stable - ImmortalWrt 25.12
+
+on:
+  workflow_dispatch:
+
+env:
+  # ImmortalWrt 长期稳定分支
+  IMMORTAL_BRANCH: openwrt-25.12
+
+  # PassWall LuCI 固定版本
+  PASSWALL_TAG: 26.8.26-1
+
+  # PassWall packages 固定到这个日期以前的版本
+  # 这时 Xray 仍然是 26.7.28，可配合 Go 1.26
+  PASSWALL_PACKAGES_CUTOFF: "2026-08-25T23:59:59Z"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      # ============================================================
+      # 1. 下载我们自己的 builder 仓库
+      #    里面主要有：
+      #      x86.config
+      #      custom.config
+      #      .github/workflows/...
+      # ============================================================
+
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. 清理 GitHub Runner 中我们完全用不到的大型 SDK
+      # ============================================================
+
+      - name: Free disk space
+        run: |
+          echo "===== Disk space before cleanup ====="
+          df -h
+
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+
+          echo "===== Disk space after cleanup ====="
+          df -h
+
+
+      # ============================================================
+      # 3. 安装 ImmortalWrt 编译环境
+      # ============================================================
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint \
+            binutils bison build-essential bzip2 ccache clang \
+            cmake cpio curl device-tree-compiler ecj fastjar \
+            flex gawk gettext gcc-multilib g++-multilib git \
+            gnutls-dev gperf haveged help2man intltool \
+            lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool libyaml-dev libz-dev lld llvm \
+            lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pip python3-ply \
+            python3-docutils python3-pyelftools qemu-utils re2c \
+            rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip vim wget xmlto xxd zlib1g-dev zstd
+
+
+      # ============================================================
+      # 4. 下载 ImmortalWrt 25.12 稳定分支
+      # ============================================================
+
+      - name: Clone ImmortalWrt
+        run: |
+          git clone \
+            --depth=1 \
+            --branch="${IMMORTAL_BRANCH}" \
+            --single-branch \
+            https://github.com/immortalwrt/immortalwrt.git \
+            immortalwrt
+
+          cd immortalwrt
+
+          echo "===== ImmortalWrt commit ====="
+          git log -1 --oneline
+
+
+      # ============================================================
+      # 5. 安装 ImmortalWrt 官方 feeds
+      #
+      # 注意：
+      # 这里暂时不加入 PassWall feed。
+      # 我们后面手工安装固定版本 PassWall。
+      # ============================================================
+
+      - name: Update official feeds
+        working-directory: immortalwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+
+      # ============================================================
+      # 6. 移除官方 feeds 中可能与 PassWall 冲突的软件
+      #
+      # 这是 PassWall 官方 README 推荐的方法之一。
+      # ============================================================
+
+      - name: Remove conflicting packages
+        working-directory: immortalwrt
+        run: |
+          echo "===== Remove conflicting packages from official feeds ====="
+
+          rm -rf feeds/packages/net/xray-core
+          rm -rf feeds/packages/net/v2ray-geodata
+          rm -rf feeds/packages/net/sing-box
+          rm -rf feeds/packages/net/chinadns-ng
+          rm -rf feeds/packages/net/dns2socks
+          rm -rf feeds/packages/net/hysteria
+          rm -rf feeds/packages/net/ipt2socks
+          rm -rf feeds/packages/net/microsocks
+          rm -rf feeds/packages/net/naiveproxy
+          rm -rf feeds/packages/net/shadowsocks-rust
+          rm -rf feeds/packages/net/shadowsocksr-libev
+          rm -rf feeds/packages/net/simple-obfs
+          rm -rf feeds/packages/net/tcping
+          rm -rf feeds/packages/net/v2ray-plugin
+          rm -rf feeds/packages/net/xray-plugin
+          rm -rf feeds/packages/net/geoview
+          rm -rf feeds/packages/net/shadow-tls
+
+          # 删除 feeds install 创建的对应软链接，避免留下坏链接
+          rm -rf package/feeds/packages/xray-core || true
+          rm -rf package/feeds/packages/v2ray-geodata || true
+          rm -rf package/feeds/packages/sing-box || true
+          rm -rf package/feeds/packages/chinadns-ng || true
+          rm -rf package/feeds/packages/dns2socks || true
+          rm -rf package/feeds/packages/hysteria || true
+          rm -rf package/feeds/packages/ipt2socks || true
+          rm -rf package/feeds/packages/microsocks || true
+          rm -rf package/feeds/packages/naiveproxy || true
+          rm -rf package/feeds/packages/shadowsocks-rust || true
+          rm -rf package/feeds/packages/shadowsocksr-libev || true
+          rm -rf package/feeds/packages/simple-obfs || true
+          rm -rf package/feeds/packages/tcping || true
+          rm -rf package/feeds/packages/v2ray-plugin || true
+          rm -rf package/feeds/packages/xray-plugin || true
+          rm -rf package/feeds/packages/geoview || true
+          rm -rf package/feeds/packages/shadow-tls || true
+
+          # 如果官方 LuCI feed 自带 PassWall，也移除
+          rm -rf feeds/luci/applications/luci-app-passwall || true
+          rm -rf package/feeds/luci/luci-app-passwall || true
+
+
+      # ============================================================
+      # 7. 安装固定版本 PassWall LuCI
+      #
+      # 固定：
+      # PassWall 26.8.26-1
+      # ============================================================
+
+      - name: Add pinned PassWall LuCI
+        working-directory: immortalwrt
+        run: |
+          git clone \
+            --depth=1 \
+            --branch="${PASSWALL_TAG}" \
+            https://github.com/Openwrt-Passwall/openwrt-passwall.git \
+            package/passwall-luci
+
+          echo "===== PassWall LuCI ====="
+          cd package/passwall-luci
+          git log -1 --oneline
+
+
+      # ============================================================
+      # 8. 安装固定时期的 PassWall packages
+      #
+      # 这里不用 main 的最新版。
+      #
+      # 我们找：
+      # 2026-08-25 以前 main 分支最后一个 commit
+      #
+      # 然后额外检查：
+      # xray-core 必须正好是 26.7.28
+      # ============================================================
+
+      - name: Add pinned PassWall packages
+        working-directory: immortalwrt
+        run: |
+          git clone \
+            --filter=blob:none \
+            https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git \
+            package/passwall-packages
+
+          cd package/passwall-packages
+
+          PWPKG_COMMIT="$(git rev-list \
+            -n 1 \
+            --before="${PASSWALL_PACKAGES_CUTOFF}" \
+            origin/main)"
+
+          if [ -z "${PWPKG_COMMIT}" ]; then
+            echo "::error::Cannot find PassWall packages commit"
+            exit 1
+          fi
+
+          echo "PassWall packages pinned commit:"
+          echo "${PWPKG_COMMIT}"
+
+          git checkout "${PWPKG_COMMIT}"
+
+          echo
+          echo "===== PassWall packages commit ====="
+          git log -1 --oneline
+
+          echo
+          echo "===== Xray package version ====="
+          grep -E '^PKG_VERSION|^PKG_RELEASE' xray-core/Makefile
+
+          # 必须是 Xray 26.7.28
+          if ! grep -q '^PKG_VERSION:=26.7.28' xray-core/Makefile; then
+            echo "::error::Wrong Xray version!"
+            echo "Expected: 26.7.28"
+            exit 1
+          fi
+
+          echo
+          echo "Xray version check OK: 26.7.28"
+
+          echo
+          echo "===== Sing-box package version ====="
+          grep -E '^PKG_VERSION|^PKG_RELEASE' sing-box/Makefile || true
+
+
+      # ============================================================
+      # 9. 加入 Lucky
+      #
+      # Lucky 暂时使用当前源码。
+      # 等这一版成功以后，我们也可以继续把 Lucky 锁 commit。
+      # ============================================================
+
+      - name: Add Lucky
+        working-directory: immortalwrt
+        run: |
+          git clone \
+            --depth=1 \
+            https://github.com/sirpdboy/luci-app-lucky.git \
+            package/lucky
+
+          echo "===== Lucky commit ====="
+          cd package/lucky
+          git log -1 --oneline
+
+
+      # ============================================================
+      # 10. 合并配置
+      #
+      # x86.config：
+      #   平台配置
+      #
+      # custom.config：
+      #   我们自己选择的软件
+      # ============================================================
+
+      - name: Configure firmware
+        working-directory: immortalwrt
+        run: |
+          cat ../x86.config > .config
+          cat ../custom.config >> .config
+
+          make defconfig
+
+          echo
+          echo "===== Target ====="
+          grep -E \
+            'CONFIG_TARGET_(x86|x86_64)' \
+            .config || true
+
+          echo
+          echo "===== Important packages ====="
+          grep -E \
+            'CONFIG_PACKAGE_(mwan3|luci-app-mwan3|luci-app-passwall|luci-app-lucky|xray-core|sing-box|smartdns|luci-app-zerotier|luci-app-ddns-go|tcpdump)' \
+            .config || true
+
+
+      # ============================================================
+      # 11. 编译前检查关键软件
+      #
+      # 如果这些软件没被 make defconfig 选进去，
+      # 立即失败，不再浪费两个小时。
+      # ============================================================
+
+      - name: Verify required packages
+        working-directory: immortalwrt
+        run: |
+          REQUIRED_PACKAGES="
+          mwan3
+          luci-app-mwan3
+          luci-app-passwall
+          luci-app-lucky
+          xray-core
+          sing-box
+          "
+
+          for pkg in ${REQUIRED_PACKAGES}; do
+            echo "Checking ${pkg} ..."
+
+            if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
+              echo "::error::Package ${pkg} was not selected"
+              exit 1
+            fi
+          done
+
+          echo
+          echo "All required packages are selected."
+
+
+      # ============================================================
+      # 12. 缓存下载目录
+      #
+      # 下一次 Action 可以少下载很多源码。
+      # ============================================================
+
+      - name: Cache source downloads
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/dl
+          key: immortalwrt-25.12-dl-${{ hashFiles('x86.config', 'custom.config') }}
+          restore-keys: |
+            immortalwrt-25.12-dl-
+
+
+      # ============================================================
+      # 13. 下载软件源码
+      # ============================================================
+
+      - name: Download package sources
+        working-directory: immortalwrt
+        run: |
+          make download -j$(nproc)
+
+          echo
+          echo "===== Remove broken tiny downloads ====="
+
+          find dl \
+            -type f \
+            -size -1024c \
+            -print \
+            -delete || true
+
+
+      # ============================================================
+      # 14. 正式编译
+      #
+      # 第一次：
+      #   -j2
+      #
+      # 如果失败：
+      #   自动改成 -j1 V=s
+      #   输出详细日志
+      # ============================================================
+
+      - name: Build firmware
+        working-directory: immortalwrt
+        run: |
+          set +e
+          set -o pipefail
+
+          echo "===== Normal build: make -j2 world ====="
+
+          make -j2 world 2>&1 | tee build.log
+          RESULT=${PIPESTATUS[0]}
+
+          if [ "${RESULT}" -eq 0 ]; then
+            echo
+            echo "Build completed successfully."
+            exit 0
+          fi
+
+          echo
+          echo "========================================"
+          echo "Normal build failed."
+          echo "Retrying with:"
+          echo "make -j1 V=s world"
+          echo "========================================"
+          echo
+
+          make -j1 V=s world 2>&1 | tee build-verbose.log
+          VERBOSE_RESULT=${PIPESTATUS[0]}
+
+          exit "${VERBOSE_RESULT}"
+
+
+      # ============================================================
+      # 15. 查看生成结果
+      # ============================================================
+
+      - name: Show build results
+        if: success()
+        run: |
+          echo "===== x86/64 build output ====="
+
+          ls -lah immortalwrt/bin/targets/x86/64/
+
+          echo
+          echo "===== SHA256 ====="
+
+          cat immortalwrt/bin/targets/x86/64/sha256sums || true
+
+
+      # ============================================================
+      # 16. 无论成功还是失败都上传产物
+      #
+      # 成功：
+      #   固件
+      #   manifest
+      #   config.buildinfo
+      #
+      # 失败：
+      #   build.log
+      #   build-verbose.log
+      # ============================================================
+
+      - name: Upload firmware and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-x86-64-stable
+          retention-days: 30
+          if-no-files-found: ignore
+          path: |
+            immortalwrt/bin/targets/x86/64/*.img.gz
+            immortalwrt/bin/targets/x86/64/*.qcow2.gz
+            immortalwrt/bin/targets/x86/64/*.vmdk.gz
+            immortalwrt/bin/targets/x86/64/*.vdi.gz
+            immortalwrt/bin/targets/x86/64/*.vhdx.gz
+            immortalwrt/bin/targets/x86/64/*.buildinfo
+            immortalwrt/bin/targets/x86/64/*.manifest
+            immortalwrt/bin/targets/x86/64/sha256sums
+            immortalwrt/build.log
+            immortalwrt/build-verbose.log
